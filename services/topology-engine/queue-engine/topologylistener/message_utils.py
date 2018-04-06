@@ -263,8 +263,8 @@ def send_info_message(payload, correlation_id):
     send_to_topic(payload, correlation_id, MT_INFO)
 
 
-def send_cache_message(payload, correlation_id):
-    send_to_topic(payload, correlation_id, MT_INFO, "WFM_CACHE", config.KAFKA_CACHE_TOPIC)
+def send_network_event_message(payload, correlation_id):
+    send_to_topic(payload, correlation_id, MT_INFO, "WFM", config.KAFKA_FLOW_TOPIC)
 
 
 def send_error_message(correlation_id, error_type, error_message,

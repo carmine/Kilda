@@ -27,13 +27,11 @@ import org.openkilda.wfm.StreamNameCollisionException;
 import org.openkilda.wfm.topology.AbstractTopology;
 import org.openkilda.wfm.topology.flow.bolts.CrudBolt;
 import org.openkilda.wfm.topology.flow.bolts.ErrorBolt;
-import org.openkilda.wfm.topology.flow.bolts.LcmFlowCacheSyncBolt;
 import org.openkilda.wfm.topology.flow.bolts.NorthboundReplyBolt;
 import org.openkilda.wfm.topology.flow.bolts.SpeakerBolt;
 import org.openkilda.wfm.topology.flow.bolts.SplitterBolt;
 import org.openkilda.wfm.topology.flow.bolts.TopologyEngineBolt;
 import org.openkilda.wfm.topology.flow.bolts.TransactionBolt;
-import org.openkilda.wfm.topology.utils.LcmKafkaSpout;
 
 import org.apache.storm.generated.ComponentObject;
 import org.apache.storm.generated.StormTopology;
@@ -99,23 +97,11 @@ public class FlowTopology extends AbstractTopology {
         KafkaSpoutConfig<String, String> kafkaSpoutConfig;
         KafkaSpout<String, String> kafkaSpout;
 
-//        builder.setSpout(
-//                ComponentType.LCM_SPOUT.toString(),
-//                createKafkaSpout(config.getKafkaFlowTopic(), ComponentType.LCM_SPOUT.toString()), 1);
-//        builder.setBolt(
-//                ComponentType.LCM_FLOW_SYNC_BOLT.toString(),
-//                new LcmFlowCacheSyncBolt(ComponentType.NORTHBOUND_KAFKA_SPOUT.toString()),
-//                1)
-//                .shuffleGrouping(ComponentType.NORTHBOUND_KAFKA_SPOUT.toString(), LcmKafkaSpout.STREAM_ID_LCM)
-//                .shuffleGrouping(ComponentType.LCM_SPOUT.toString());
-
         /*
          * Spout receives all Northbound requests.
          */
         kafkaSpoutConfig = makeKafkaSpoutConfigBuilder(
                 ComponentType.NORTHBOUND_KAFKA_SPOUT.toString(), config.getKafkaFlowTopic()).build();
-        // (crimi) - commenting out LcmKafkaSpout here due to dying worker
-        //kafkaSpout = new LcmKafkaSpout<>(kafkaSpoutConfig);
         kafkaSpout = new KafkaSpout<>(kafkaSpoutConfig);
         builder.setSpout(ComponentType.NORTHBOUND_KAFKA_SPOUT.toString(), kafkaSpout, parallelism);
 
@@ -151,20 +137,7 @@ public class FlowTopology extends AbstractTopology {
                 .fieldsGrouping(ComponentType.TRANSACTION_BOLT.toString(), StreamType.STATUS.toString(), fieldFlowId)
                 .fieldsGrouping(ComponentType.SPEAKER_BOLT.toString(), StreamType.STATUS.toString(), fieldFlowId)
                 .fieldsGrouping(ComponentType.TOPOLOGY_ENGINE_BOLT.toString(), StreamType.STATUS.toString(), fieldFlowId);
-//                .shuffleGrouping(
-//                        ComponentType.LCM_FLOW_SYNC_BOLT.toString(), LcmFlowCacheSyncBolt.STREAM_ID_SYNC_FLOW_CACHE);
         ctrlTargets.add(new CtrlBoltRef(ComponentType.CRUD_BOLT.toString(), crudBolt, boltSetup));
-
-        /*
-         * Bolt sends cache updates.
-         */
-        KafkaBolt cacheKafkaBolt = createKafkaBolt(config.getKafkaTopoCacheTopic());
-        builder.setBolt(ComponentType.CACHE_KAFKA_BOLT.toString(), cacheKafkaBolt, parallelism)
-                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.CREATE.toString())
-                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.UPDATE.toString())
-                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.DELETE.toString())
-                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.STATUS.toString())
-                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.CACHE_SYNC.toString());
 
         /*
          * Spout receives Topology Engine response
@@ -178,7 +151,12 @@ public class FlowTopology extends AbstractTopology {
          */
         TopologyEngineBolt topologyEngineBolt = new TopologyEngineBolt();
         builder.setBolt(ComponentType.TOPOLOGY_ENGINE_BOLT.toString(), topologyEngineBolt, parallelism)
-                .shuffleGrouping(ComponentType.TOPOLOGY_ENGINE_KAFKA_SPOUT.toString());
+                .shuffleGrouping(ComponentType.TOPOLOGY_ENGINE_KAFKA_SPOUT.toString())
+                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.CREATE.toString())
+                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.UPDATE.toString())
+                .shuffleGrouping(ComponentType.CRUD_BOLT.toString(), StreamType.DELETE.toString())
+
+        ;
 
         /*
          * Bolt sends Speaker requests

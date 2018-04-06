@@ -38,7 +38,6 @@ def _get_bootstrap_servers():
 
 KAFKA_BOOTSTRAP_SERVERS = _get_bootstrap_servers()
 KAFKA_FLOW_TOPIC = config.get('kafka', 'flow.topic')
-KAFKA_CACHE_TOPIC = config.get('kafka', 'cache.topic')
 KAFKA_SPEAKER_TOPIC = config.get('kafka', 'speaker.topic')
 KAFKA_TOPO_ENG_TOPIC = config.get('kafka', 'topo.eng.topic')
 KAFKA_NORTHBOUND_TOPIC = config.get('kafka', 'northbound.topic')

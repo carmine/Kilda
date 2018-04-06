@@ -22,6 +22,7 @@ import static org.openkilda.messaging.info.flow.FlowOperation.UPDATE;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Sets;
 import org.apache.storm.state.InMemoryKeyValueState;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
@@ -31,6 +32,7 @@ import org.apache.storm.tuple.Tuple;
 import org.apache.storm.tuple.Values;
 import org.apache.commons.lang.StringUtils;
 import org.neo4j.cypher.InvalidArgumentException;
+import org.openkilda.messaging.BaseMessage;
 import org.openkilda.messaging.Destination;
 import org.openkilda.messaging.Message;
 import org.openkilda.messaging.Utils;
@@ -49,9 +51,10 @@ import org.openkilda.messaging.error.ErrorData;
 import org.openkilda.messaging.error.ErrorMessage;
 import org.openkilda.messaging.error.ErrorType;
 import org.openkilda.messaging.error.MessageException;
+import org.openkilda.messaging.info.InfoData;
 import org.openkilda.messaging.info.InfoMessage;
 import org.openkilda.messaging.info.discovery.NetworkInfoData;
-import org.openkilda.messaging.info.event.PathInfoData;
+import org.openkilda.messaging.info.event.*;
 import org.openkilda.messaging.info.flow.FlowCacheSyncResponse;
 import org.openkilda.messaging.info.flow.FlowInfoData;
 import org.openkilda.messaging.info.flow.FlowOperation;
@@ -876,6 +879,136 @@ public class CrudBolt
             }
         }
     }
+
+
+    public void RerouteIfRequired(Tuple tuple) {
+
+        BaseMessage bm = MAPPER.readValue(json, BaseMessage.class);
+        if (bm instanceof InfoMessage == false) {
+            return;
+        }
+        InfoMessage message = (InfoMessage) bm;
+        InfoData data = message.getData();
+
+        if (data instanceof SwitchInfoData) {
+            logger.info("Cache update switch info data: {}", data);
+            handleSwitchEvent((SwitchInfoData) data, tuple);
+
+        } else if (data instanceof IslInfoData) {
+            logger.info("Cache update isl info data: {}", data);
+            handleIslEvent((IslInfoData) data, tuple);
+
+        } else if (data instanceof PortInfoData) {
+            logger.info("Cache update port info data: {}", data);
+            handlePortEvent((PortInfoData) data, tuple);
+
+        } else if (data instanceof NetworkTopologyChange) {
+            logger.info("Switch flows reroute request");
+
+            NetworkTopologyChange topologyChange = (NetworkTopologyChange) data;
+            handleNetworkTopologyChangeEvent(topologyChange, tuple);
+        }
+    }
+
+    private void handleSwitchEvent(SwitchInfoData sw, Tuple tuple) throws IOException {
+        logger.info("State update switch {} message {}", sw.getSwitchId(), sw.getState());
+        Set<ImmutablePair<Flow, Flow>> affectedFlows;
+
+        switch (sw.getState()) {
+            case REMOVED:
+            case DEACTIVATED:
+                affectedFlows = flowCache.getActiveFlowsWithAffectedPath(sw.getSwitchId());
+                String reason = String.format("switch %s is %s", sw.getSwitchId(), sw.getState());
+                handle_reroute(affectedFlows, tuple, UUID.randomUUID().toString(), FlowOperation.UPDATE, reason);
+                break;
+        }
+    }
+
+    private void handleIslEvent(IslInfoData isl, Tuple tuple) {
+        logger.info("State update isl {} message cached {}", isl.getId(), isl.getState());
+        Set<ImmutablePair<Flow, Flow>> affectedFlows;
+
+        switch (isl.getState()) {
+            case FAILED:
+                affectedFlows = flowCache.getActiveFlowsWithAffectedPath(isl);
+                String reason = String.format("isl %s FAILED", isl.getId());
+                handle_reroute(affectedFlows, tuple, UUID.randomUUID().toString(),
+                        FlowOperation.UPDATE, reason);
+                break;
+        }
+    }
+
+    private void handlePortEvent(PortInfoData port, Tuple tuple) {
+        switch (port.getState()) {
+            case DOWN:
+            case DELETE:
+                Set<ImmutablePair<Flow, Flow>> affectedFlows = flowCache.getActiveFlowsWithAffectedPath(port);
+                String reason = String.format("port %s_%s is %s", port.getSwitchId(), port.getPortNo(), port.getState());
+                handle_reroute(affectedFlows, tuple, UUID.randomUUID().toString(), FlowOperation.UPDATE, reason);
+                break;
+        }
+    }
+
+    private void handleNetworkTopologyChangeEvent(NetworkTopologyChange topologyChange, Tuple tuple) {
+        Set<ImmutablePair<Flow, Flow>> affectedFlows;
+
+        switch (topologyChange.getType()) {
+            case ENDPOINT_DROP:
+                // TODO(surabujin): need implementation
+                return;
+
+            case ENDPOINT_ADD:
+                affectedFlows = getFlowsForRerouting(topologyChange);
+                break;
+
+        }
+        String reason = String.format("network topology change  %s_%s is %s",
+                topologyChange.getSwitchId(), topologyChange.getPortNumber(),
+                topologyChange.getType());
+        handle_reroute(affectedFlows, tuple, UUID.randomUUID().toString(),
+                FlowOperation.UPDATE, reason);
+    }
+
+    private void handle_reroute(Set<ImmutablePair<Flow, Flow>> flows, Tuple tuple,
+                                     String correlationId, FlowOperation operation, String reason) {
+        for (ImmutablePair<Flow, Flow> flow : flows) {
+            try {
+                flow.getLeft().setState(FlowState.DOWN);
+                flow.getRight().setState(FlowState.DOWN);
+                FlowRerouteRequest request = new FlowRerouteRequest(flow.getLeft(), operation);
+
+                Values values = new Values(Utils.MAPPER.writeValueAsString(new CommandMessage(
+                        request, System.currentTimeMillis(), correlationId, Destination.WFM)));
+                outputCollector.emit(org.openkilda.wfm.topology.cache.StreamType.WFM_DUMP.toString(), tuple, values);
+
+                logger.warn("Flow {} reroute command message sent with correlationId {} reason {}",
+                        flow.getLeft().getFlowId(), correlationId, reason);
+            } catch (JsonProcessingException exception) {
+                logger.error("Could not format flow reroute request by flow={}", flow, exception);
+            }
+        }
+    }
+
+
+    /*
+     * getFlowsForRerouting (NetTopoChg) -> inactive (DOWN) flows -> union of inactive and TransitFlows
+     * getTransitFlowsPreviouslyInstalled (sw) -> set (flows)
+     */
+
+    private Set<ImmutablePair<Flow, Flow>> getFlowsForRerouting(NetworkTopologyChange rerouteData) {
+        Set<ImmutablePair<Flow, Flow>> inactiveFlows = flowCache.dumpFlows().stream()
+                .filter(flow -> FlowState.DOWN.equals(flow.getLeft().getState()))
+                .collect(Collectors.toSet());
+
+        // would have to figure out transit flows .. but flowcache down .. ** needs to be updated based on network state **
+        //Set<ImmutablePair<Flow, Flow>> transitFlows = getTransitFlowsPreviouslyInstalled(rerouteData.getSwitchId());
+        return Sets.union(inactiveFlows, transitFlows);
+
+    }
+
+
+
+
 
     @Override
     public AbstractDumpState dumpState() {

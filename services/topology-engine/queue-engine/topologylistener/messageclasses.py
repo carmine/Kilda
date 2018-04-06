@@ -46,9 +46,7 @@ MT_STATE_TOGGLE = "org.openkilda.messaging.command.system.FeatureToggleStateRequ
 MT_TOGGLE = "org.openkilda.messaging.command.system.FeatureToggleRequest"
 MT_NETWORK_TOPOLOGY_CHANGE = (
     "org.openkilda.messaging.info.event.NetworkTopologyChange")
-CD_NETWORK = "org.openkilda.messaging.command.discovery.NetworkCommandData"
 CD_FLOWS_SYNC_REQUEST = 'org.openkilda.messaging.command.FlowsSyncRequest'
-
 
 FEATURE_SYNC_OFRULES = 'sync_rules_on_activation'
 FEATURE_REROUTE_ON_ISL_DISCOVERY = 'flows_reroute_on_isl_discovery'
@@ -155,9 +153,13 @@ class MessageItem(object):
                     event_handled = self.port_down()
                 else:
                     event_handled = True
-            # Cache topology expects to receive OFE events
+
+            # Notify others (like flow topology) of network events.
+            # Whereas it seems that TPE should have this responsibility .. this helps enforce strong consistency ..
+            # by notifying others after the DB is updated.
+
             if event_handled:
-                message_utils.send_cache_message(self.payload,
+                message_utils.send_network_event_message(self.payload,
                                                  self.correlation_id)
                 self.handle_topology_change()
 
@@ -168,8 +170,6 @@ class MessageItem(object):
                 self.handle_flow_topology_sync()
                 event_handled = True
 
-            elif self.get_command() == CD_NETWORK:
-                event_handled = self.dump_network()
 
             elif self.get_message_type() == MT_STATE_TOGGLE:
                 event_handled = self.get_feature_toggle_state()
@@ -469,7 +469,7 @@ class MessageItem(object):
             'switch_id': node['switch_id'],
             'port_number': node['port_no']}
 
-        message_utils.send_cache_message(
+        message_utils.send_network_event_message(
                 payload, self.correlation_id)
 
     @staticmethod
@@ -809,38 +809,6 @@ class MessageItem(object):
         except Exception as e:
             logger.exception('FAILED to get ISLs from the DB ', e.message)
             raise
-
-    def dump_network(self):
-        correlation_id = self.correlation_id
-        step = "Init"
-        logger.info('Dump network request: timestamp=%s, correlation_id=%s',
-                    self.timestamp, correlation_id)
-
-        try:
-            step = "Switches"
-            switches = self.get_switches()
-            logger.debug("%s: %s", step, switches)
-
-            step = "ISLs"
-            isls = self.get_isls()
-            logger.debug("%s: %s", step, isls)
-
-            step = "Flows"
-            flows = flow_utils.get_flows()
-            logger.debug("%s: %s", step, flows)
-
-            step = "Send"
-            message_utils.send_network_dump(
-                correlation_id, switches, isls, flows)
-
-        except Exception as e:
-            logger.exception('Can not dump network: %s', e.message)
-            message_utils.send_error_message(
-                correlation_id, "INTERNAL_ERROR", e.message, step,
-                "WFM_CACHE", config.KAFKA_CACHE_TOPIC)
-            raise
-
-        return True
 
     def handle_flow_topology_sync(self):
         payload = {
